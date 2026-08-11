@@ -106,11 +106,11 @@
 
   .field{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;}
   .field span.field-label{font-size:.78rem;font-weight:600;color:var(--ink-soft);}
-  input[type=text],input[type=number],input[type=date],textarea{
+  input[type=text],input[type=number],input[type=date],textarea,select{
     width:100%;font-size:1rem;padding:12px 13px;border:1.5px solid var(--line);
     border-radius:10px;background:#FBFDFD;color:var(--ink);font-family:inherit;
   }
-  input:focus-visible,textarea:focus-visible,button:focus-visible{
+  input:focus-visible,textarea:focus-visible,select:focus-visible,button:focus-visible{
     outline:3px solid var(--orange);outline-offset:1px;
   }
   textarea{resize:vertical;min-height:80px;}
@@ -230,6 +230,15 @@
         <label class="field">
           <span class="field-label">Organización</span>
           <input type="text" id="organizacion" placeholder="Nombre de la escuela u organización" />
+        </label>
+        <label class="field">
+          <span class="field-label">Programa</span>
+          <select id="programa">
+            <option value="">— Selecciona —</option>
+            <option value="ATT">ATT</option>
+            <option value="BI">BI</option>
+            <option value="STEEAM 1bot">STEEAM 1bot</option>
+          </select>
         </label>
       </div>
     </section>
@@ -820,6 +829,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
   function resetForm(){
     document.getElementById('organizacion').value = '';
+    document.getElementById('programa').value = '';
     document.getElementById('nombreEntrega').value = '';
     document.getElementById('nombreRecibe').value = '';
     document.getElementById('observaciones').value = '';
@@ -898,6 +908,33 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     return { setup: setup, clear: clear, canvas: canvas, getSize: getSize };
   }
 
+  // ====== LOGO LISTO PARA EL PDF ======
+  // Prepara el logo como imagen decodificada desde el arranque, sin depender
+  // de que el <img> de la pantalla haya terminado de cargar. Así el PDF sale
+  // con datos aunque el usuario comparta en su primerísima visita.
+  var LOGO_PDF = { dataUrl: null, w: 0, h: 0, ready: false };
+  (function prepararLogoPdf(){
+    try {
+      var src = document.querySelector('.brand-logo');
+      if (!src || !src.src) return;
+      var img = new Image();
+      img.onload = function(){
+        try {
+          var c = document.createElement('canvas');
+          c.width = img.naturalWidth; c.height = img.naturalHeight;
+          c.getContext('2d').drawImage(img, 0, 0);
+          LOGO_PDF.dataUrl = c.toDataURL('image/png');
+          LOGO_PDF.w = img.naturalWidth;
+          LOGO_PDF.h = img.naturalHeight;
+          LOGO_PDF.ready = true;
+        } catch(e){ /* si falla, el PDF simplemente sale sin logo */ }
+      };
+      img.src = src.src;
+      // Si ya estaba en caché y disponible al instante
+      if (img.complete && img.naturalWidth){ img.onload(); }
+    } catch(e){}
+  })();
+
   var padEntrega = makeSignaturePad('sigCanvasEntrega', 'sigPlaceholderEntrega');
   var padRecibe = makeSignaturePad('sigCanvasRecibe', 'sigPlaceholderRecibe');
   document.getElementById('btnClearEntrega').addEventListener('click', padEntrega.clear);
@@ -946,10 +983,9 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     var doc = new jsPDFCtor({ unit: 'mm', format: 'a4' });
     var marginX = 15, contentW = 180, y = 16;
 
-    var logoImg = document.querySelector('.brand-logo');
-    if (logoImg && logoImg.naturalWidth){
-      var logoW = 42, logoH = logoW * (logoImg.naturalHeight / logoImg.naturalWidth);
-      try { doc.addImage(logoImg.src, 'PNG', marginX, y, logoW, logoH); } catch(e){}
+    if (LOGO_PDF.ready && LOGO_PDF.dataUrl){
+      var logoW = 42, logoH = logoW * (LOGO_PDF.h / LOGO_PDF.w);
+      try { doc.addImage(LOGO_PDF.dataUrl, 'PNG', marginX, y, logoW, logoH); } catch(e){}
     }
     doc.setFont('helvetica','bold');
     doc.setFontSize(15);
@@ -1071,12 +1107,46 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     return lines.join('\n');
   }
 
+  // Igual que getEquipoResumen pero como datos estructurados (no texto), para
+  // registrar cada artículo como una fila independiente en la hoja de Kardex.
+  function getEquipoItems(){
+    var items = [];
+    itemsContainer.querySelectorAll('.item-card').forEach(function(row){
+      var cant = row.querySelector('.in-cant').value || '';
+      var nombre = row.querySelector('.in-nombre').value || '';
+      var desc = row.querySelector('.in-desc').value || '';
+      if (cant || nombre || desc){
+        items.push({ cantidad: cant, nombre: nombre, estado: desc });
+      }
+    });
+    return items;
+  }
+
   document.getElementById('btnShare').addEventListener('click', function(){
+    if (!window.jspdf || !window.jspdf.jsPDF){
+      alert('La app todavía está terminando de cargar. Espera un momento y vuelve a intentar.');
+      return;
+    }
+    // Evita generar/registrar documentos en blanco: exige al menos algún dato.
+    var _org = document.getElementById('organizacion').value.trim();
+    var _nEnt = document.getElementById('nombreEntrega').value.trim();
+    var _nRec = document.getElementById('nombreRecibe').value.trim();
+    var _equipo = getEquipoResumen().trim();
+    if (!_org && !_nEnt && !_nRec && !_equipo){
+      alert('Completa al menos la organización, un nombre o el equipo antes de compartir.');
+      return;
+    }
     var fecha = document.getElementById('fecha').value || 'sin-fecha';
     var org = (document.getElementById('organizacion').value || 'nota').trim().replace(/\s+/g,'_') || 'nota';
     var noteId = generateNoteId('NE');
     var filename = 'Nota_entrega_' + org + '_' + fecha + '_' + noteId + '.pdf';
-    var blob = buildPdfDoc(noteId).output('blob');
+    var blob;
+    try {
+      blob = buildPdfDoc(noteId).output('blob');
+    } catch (e){
+      alert('No se pudo generar el PDF. Recarga la página e intenta de nuevo.');
+      return;
+    }
 
     // Foto de los datos al momento de compartir (para reintentos posteriores)
     var payload = {
@@ -1084,9 +1154,11 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
       noteId: noteId,
       fecha: document.getElementById('fecha').value,
       organizacion: document.getElementById('organizacion').value,
+      programa: document.getElementById('programa').value,
       nombreEntrega: document.getElementById('nombreEntrega').value,
       nombreRecibe: document.getElementById('nombreRecibe').value,
       equipoResumen: getEquipoResumen(),
+      items: getEquipoItems(),
       observaciones: document.getElementById('observaciones').value
     };
 
@@ -1166,10 +1238,9 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     var doc = new jsPDFCtor({ unit: 'mm', format: 'a4' });
     var marginX = 15, contentW = 180, y = 16;
 
-    var logoImg = document.querySelector('.brand-logo');
-    if (logoImg && logoImg.naturalWidth){
-      var logoW = 42, logoH = logoW * (logoImg.naturalHeight / logoImg.naturalWidth);
-      try { doc.addImage(logoImg.src, 'PNG', marginX, y, logoW, logoH); } catch(e){}
+    if (LOGO_PDF.ready && LOGO_PDF.dataUrl){
+      var logoW = 42, logoH = logoW * (LOGO_PDF.h / LOGO_PDF.w);
+      try { doc.addImage(LOGO_PDF.dataUrl, 'PNG', marginX, y, logoW, logoH); } catch(e){}
     }
     doc.setFont('helvetica','bold');
     doc.setFontSize(15);
@@ -1222,11 +1293,32 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   }
 
   document.getElementById('v_btnShare').addEventListener('click', function(){
+    if (!window.jspdf || !window.jspdf.jsPDF){
+      alert('La app todavía está terminando de cargar. Espera un momento y vuelve a intentar.');
+      return;
+    }
+    // Evita generar/registrar documentos en blanco: exige al menos algún dato.
+    var _org = document.getElementById('v_organizacion').value.trim();
+    var _nVis = document.getElementById('v_nombreVisita').value.trim();
+    var _nRec = document.getElementById('v_nombreRecibio').value.trim();
+    var _motivo = document.getElementById('v_motivo').value.trim();
+    var _puntos = getPuntosResumen().trim();
+    var _solic = document.getElementById('v_solicitudes').value.trim();
+    if (!_org && !_nVis && !_nRec && !_motivo && !_puntos && !_solic){
+      alert('Completa al menos la organización, un nombre o el motivo antes de compartir.');
+      return;
+    }
     var fecha = document.getElementById('v_fecha').value || 'sin-fecha';
     var org = (document.getElementById('v_organizacion').value || 'visita').trim().replace(/\s+/g,'_') || 'visita';
     var noteId = generateNoteId('HV');
     var filename = 'Hoja_visita_' + org + '_' + fecha + '_' + noteId + '.pdf';
-    var blob = buildVisitaPdfDoc(noteId).output('blob');
+    var blob;
+    try {
+      blob = buildVisitaPdfDoc(noteId).output('blob');
+    } catch (e){
+      alert('No se pudo generar el PDF. Recarga la página e intenta de nuevo.');
+      return;
+    }
 
     var payload = {
       tipo: 'Visita',
