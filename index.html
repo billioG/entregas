@@ -67,11 +67,6 @@
   .btn-instalar:active{transform:scale(.97);}
 
   .cloud-status{padding:12px 20px 0;display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
-  .cloud-connect-btn{
-    background:var(--teal-soft);color:var(--teal-dark);border:1.4px solid var(--teal);
-    border-radius:20px;padding:7px 16px;font-size:.78rem;font-weight:700;cursor:pointer;
-  }
-  .cloud-connect-btn.connected{background:var(--teal);color:#fff;cursor:default;}
 
   .home-intro{font-size:1rem;font-weight:600;color:var(--ink-soft);margin:6px 0 18px;}
   .home-choices{display:flex;flex-direction:column;gap:14px;}
@@ -197,7 +192,6 @@
   </header>
 
   <div class="cloud-status" id="cloudStatus" hidden>
-    <button type="button" class="cloud-connect-btn" id="btnConnectDrive" hidden>Conectar Google Drive</button>
     <span class="pending-badge" id="pendingSyncBadge" hidden></span>
   </div>
 
@@ -1422,9 +1416,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   // Ver guia-integracion-nota-entrega.md para instrucciones.
   // ============================================================
   var CLOUD_CONFIG = {
-    GOOGLE_CLIENT_ID: '327920336059-m3rdeq3li6sq4chc9i7umpmfqm02fhv7.apps.googleusercontent.com',
-    APPS_SCRIPT_URL: 'https://script.google.com/a/macros/1bot.org/s/AKfycbzjNq7gFi_n8Nc3bBSlv2DRQz1DOVRCQoIyFp6vERkIxxXafVyMynS6bWPjQeIagOzQ6Q/exec',
-    DRIVE_FOLDER_ID: '1Y0fCx4DELu_5wn72g57S_vW0U5UGcCaW'
+    APPS_SCRIPT_URL: 'https://script.google.com/a/macros/1bot.org/s/AKfycbzjNq7gFi_n8Nc3bBSlv2DRQz1DOVRCQoIyFp6vERkIxxXafVyMynS6bWPjQeIagOzQ6Q/exec'
   };
 
   function isConfigured(value){
@@ -1457,25 +1449,18 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     });
   }
 
-  // Sincroniza un item ya "fotografiado": sube a Drive (si hay sesión) y
-  // manda todo al Apps Script. item.payload es la foto de los datos tomada
-  // al momento de compartir, así el reintento envía exactamente lo compartido.
+  // Sincroniza un item ya "fotografiado": manda todo al Apps Script, que se
+  // encarga de subir el PDF a Drive (con la cuenta 1bot.org, sin depender de
+  // quién llena el formulario) y de registrar en Sheet/ClickUp.
+  // item.payload es la foto de los datos tomada al momento de compartir,
+  // así el reintento envía exactamente lo compartido.
   function performSync(item){
-    var driveUpload = driveAccessToken ? uploadToDrive(item.blob, item.filename) : Promise.resolve(null);
-    return driveUpload.then(function(driveResult){
-      if (driveAccessToken && !driveResult){
-        console.warn('[docs-1bot] La subida a Drive falló (revisa que DRIVE_FOLDER_ID tenga permiso de Editor para tu cuenta).');
-      } else if (driveResult){
-        console.info('[docs-1bot] PDF guardado en Drive:', driveResult.webViewLink);
-      }
-      return blobToBase64(item.blob).then(function(pdfBase64){
-        var payload = {};
-        for (var k in item.payload){ payload[k] = item.payload[k]; }
-        payload.driveUrl = (driveResult && driveResult.webViewLink) ? driveResult.webViewLink : '';
-        payload.filename = item.filename;
-        payload.pdfBase64 = pdfBase64;
-        return logToBackend(payload);
-      });
+    return blobToBase64(item.blob).then(function(pdfBase64){
+      var payload = {};
+      for (var k in item.payload){ payload[k] = item.payload[k]; }
+      payload.filename = item.filename;
+      payload.pdfBase64 = pdfBase64;
+      return logToBackend(payload);
     });
   }
 
@@ -1538,8 +1523,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
     } else {
       badge.hidden = true;
     }
-    var driveBtn = document.getElementById('btnConnectDrive');
-    if (statusEl) statusEl.hidden = badge.hidden && (!driveBtn || driveBtn.hidden);
+    if (statusEl) statusEl.hidden = badge.hidden;
   }
   function refreshPendingCount(){
     return dbGetAll().then(function(items){
@@ -1593,83 +1577,6 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
   }
 
   window.addEventListener('online', retryPending);
-
-  // --- Google Drive (Google Identity Services + Drive API v3) ---
-  var driveAccessToken = null;
-  var tokenClient = null;
-
-  function setDriveButtonState(connected){
-    var btn = document.getElementById('btnConnectDrive');
-    if (!btn) return;
-    if (connected){
-      btn.textContent = '✓ Conectado a Google Drive';
-      btn.classList.add('connected');
-    } else {
-      btn.textContent = 'Conectar Google Drive';
-      btn.classList.remove('connected');
-    }
-  }
-
-  function uploadToDrive(blob, filename){
-    if (!driveAccessToken) return Promise.resolve(null);
-    var metadata = { name: filename, mimeType: 'application/pdf' };
-    if (isConfigured(CLOUD_CONFIG.DRIVE_FOLDER_ID)) metadata.parents = [CLOUD_CONFIG.DRIVE_FOLDER_ID];
-    var boundary = '-------1bot314159265358979';
-    var delimiter = '\r\n--' + boundary + '\r\n';
-    var closeDelim = '\r\n--' + boundary + '--';
-    var body = new Blob([
-      delimiter,
-      'Content-Type: application/json; charset=UTF-8\r\n\r\n',
-      JSON.stringify(metadata),
-      delimiter,
-      'Content-Type: application/pdf\r\n\r\n',
-      blob,
-      closeDelim
-    ]);
-    return fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + driveAccessToken,
-        'Content-Type': 'multipart/related; boundary=' + boundary
-      },
-      body: body
-    }).then(function(r){
-      if (!r.ok) { console.warn('[nota-entrega] Drive respondió con error', r.status); return null; }
-      return r.json();
-    }).catch(function(err){ console.warn('[nota-entrega] Error al subir a Drive:', err); return null; });
-  }
-
-  if (isConfigured(CLOUD_CONFIG.GOOGLE_CLIENT_ID)){
-    var gisScript = document.createElement('script');
-    gisScript.src = 'https://accounts.google.com/gsi/client';
-    gisScript.async = true;
-    gisScript.onload = function(){
-      if (!window.google || !google.accounts || !google.accounts.oauth2) return;
-      tokenClient = google.accounts.oauth2.initTokenClient({
-        client_id: CLOUD_CONFIG.GOOGLE_CLIENT_ID,
-        scope: 'https://www.googleapis.com/auth/drive.file',
-        callback: function(resp){
-          if (resp && resp.access_token){
-            driveAccessToken = resp.access_token;
-            setDriveButtonState(true);
-          }
-        }
-      });
-      var connectBtnEl = document.getElementById('btnConnectDrive');
-      if (connectBtnEl) connectBtnEl.hidden = false;
-      updatePendingBadge();
-    };
-    gisScript.onerror = function(){ /* sin conexión: la app sigue funcionando igual */ };
-    document.head.appendChild(gisScript);
-
-    var connectBtn = document.getElementById('btnConnectDrive');
-    if (connectBtn){
-      connectBtn.addEventListener('click', function(){
-        if (driveAccessToken || !tokenClient) return;
-        tokenClient.requestAccessToken();
-      });
-    }
-  }
 })();
 </script>
 </body>
